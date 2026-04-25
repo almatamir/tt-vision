@@ -1,6 +1,3 @@
-"""
-Pose-based shot classification for table-tennis video analysis.
-"""
 from __future__ import annotations
 
 import argparse
@@ -16,12 +13,10 @@ import pandas as pd
 from matplotlib.lines import Line2D
 from ultralytics import YOLO
 
-from models import AnalyzerConfig, PersonDetection
-from table_tennis_analyzer import extract_people, is_valid_frame
+from models import AnalyzerConfig
+from table_tennis_analyzer import is_valid_frame
 
 logger = logging.getLogger(__name__)
-
-# ── Shot type registry ─────────────────────────────────────────────────────────
 
 SHOT_TYPES: dict[str, int] = {
     'FOREHAND': 0,
@@ -31,11 +26,8 @@ SHOT_TYPES: dict[str, int] = {
     'SERVE':    4,
     'UNKNOWN':  5,
 }
-# Reverse lookup: int → name.  Built once, used everywhere — no list iteration.
 SHOT_NAMES: dict[int, str] = {v: k for k, v in SHOT_TYPES.items()}
 
-
-# ── Classifier ─────────────────────────────────────────────────────────────────
 
 class ShotTypeClassifier:
 
@@ -50,37 +42,28 @@ class ShotTypeClassifier:
     _LEFT_HIP       = 11
     _RIGHT_HIP      = 12
 
-    # Detection / debounce thresholds
     _SPEED_THRESHOLD    = 15.0
     _SMASH_SPEED        = 22.0
-    _SMASH_WRIST_LIFT   = 20       # px above shoulder
+    _SMASH_WRIST_LIFT   = 20
     _BACKHAND_SPEED     = 10.0
     _FOREHAND_SPEED     = 12.0
     _PUSH_SPEED_MIN     = 5.0
     _PUSH_SPEED_MAX     = 12.0
-    _MAX_FRAME_GAP      = 15       # skip speed calc across large tracking gaps
-    _DEBOUNCE_FRAMES    = 5        # suppress duplicate detections per player
-    _HISTORY_TTL_FRAMES = 150      # prune movement_history entries idle this long
-    _MIN_KPT_CONF       = 0.4      # minimum YOLO keypoint confidence to trust a joint
-    _VOTE_WINDOW        = 5        # number of above-threshold frames used for majority vote
+    _MAX_FRAME_GAP      = 15
+    _DEBOUNCE_FRAMES    = 5
+    _HISTORY_TTL_FRAMES = 150
+    _MIN_KPT_CONF       = 0.4
+    _VOTE_WINDOW        = 5
 
     def __init__(self, model_path: str = "yolov8n-pose.pt",
                  cfg: AnalyzerConfig = AnalyzerConfig()) -> None:
         self.model = YOLO(model_path)
         self.cfg   = cfg
-
-        # Bounded history per track ID.  deque(maxlen=10) evicts old entries
-        # automatically — no manual pop(0) needed.
         self._movement_history: defaultdict[int, deque] = \
             defaultdict(lambda: deque(maxlen=10))
-
-        # Track when each ID was last seen so we can prune stale entries.
         self._last_seen: dict[int, int] = {}
-
         self._last_shot_info:  dict[int, dict] = {}
         self.shots_detected:   list[dict]       = []
-
-    # ── Public interface ───────────────────────────────────────────────────────
 
     def analyze_video(self, video_path: str = "score_video.mp4",
                       start_frame: int = 0,
@@ -89,10 +72,6 @@ class ShotTypeClassifier:
                       sample_rate: int = 2,
                       visualize: bool = True,
                       slow_motion_factor: int = 1) -> list[dict]:
-        """
-        Analyze video and produce annotated output + statistics.
-        Only valid frames are written to the output video.
-        """
         os.makedirs(output_dir, exist_ok=True)
 
         cap = cv2.VideoCapture(video_path)
@@ -107,21 +86,18 @@ class ShotTypeClassifier:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             end_frame    = min(end_frame or total_frames, total_frames)
 
-            slow_tag      = f"_slowmo{slow_motion_factor}x" if slow_motion_factor > 1 else ""
-            out_path      = f"{output_dir}/shot_classification{slow_tag}.mp4"
-            writer_fps    = max(1.0, fps / sample_rate)
-            out           = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'),
-                                            writer_fps, (width, height)) if visualize else None
+            slow_tag   = f"_slowmo{slow_motion_factor}x" if slow_motion_factor > 1 else ""
+            out_path   = f"{output_dir}/shot_classification{slow_tag}.mp4"
+            writer_fps = max(1.0, fps / sample_rate)
+            out        = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'),
+                                         writer_fps, (width, height)) if visualize else None
             if out and not out.isOpened():
-                logger.error("Cannot open VideoWriter: %s", out_path)
                 out = None
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            shot_counters  = [{v: 0 for v in SHOT_TYPES.values()} for _ in range(2)]
-            frame_idx      = start_frame
-            PERSISTENCE    = max(5, int(fps / sample_rate / 2))
-
-            logger.info("Analyzing frames %d–%d of %s...", start_frame, end_frame, video_path)
+            shot_counters = [{v: 0 for v in SHOT_TYPES.values()} for _ in range(2)]
+            frame_idx     = start_frame
+            PERSISTENCE   = max(5, int(fps / sample_rate / 2))
 
             while cap.isOpened() and frame_idx < end_frame:
                 ret, frame = cap.read()
@@ -157,12 +133,6 @@ class ShotTypeClassifier:
                             for _ in range(slow_motion_factor):
                                 out.write(vis)
 
-                    if ((frame_idx - start_frame) % (sample_rate * 60) == 0
-                            and frame_idx > start_frame):
-                        logger.info("  frame %d/%d (%.1fs analyzed)",
-                                    frame_idx, end_frame,
-                                    (frame_idx - start_frame) / fps)
-
                 frame_idx += 1
 
         finally:
@@ -174,10 +144,7 @@ class ShotTypeClassifier:
         logger.info("Shot analysis complete — %d shots detected", len(self.shots_detected))
         return self.shots_detected
 
-    # ── Private helpers ────────────────────────────────────────────────────────
-
     def _prune_stale_ids(self, frame_idx: int) -> None:
-        """Remove movement history for players not seen recently."""
         stale = [pid for pid, last in self._last_seen.items()
                  if frame_idx - last > self._HISTORY_TTL_FRAMES]
         for pid in stale:
@@ -185,13 +152,7 @@ class ShotTypeClassifier:
             self._last_seen.pop(pid, None)
 
     def _identify_players(self, detections_by_id: dict,
-                           width: int, height: int) -> dict:
-        """
-        Select leftmost and rightmost players from tracked detections.
-        Delegates person filtering to extract_people() — no duplicated logic.
-        """
-        from ultralytics.engine.results import Boxes
-        # Build a lightweight mock to reuse extract_people's filtering
+                           _width: int, _height: int) -> dict:
         candidates = []
         for id_, data in detections_by_id.items():
             if data['cls'] != 0:
@@ -219,9 +180,7 @@ class ShotTypeClassifier:
 
     def _process_valid_frame(self, frame, frame_idx: int, fps: float,
                               results, shot_counters: list) -> dict:
-        """Extract shots from a validated frame; returns per-player vis info."""
         kpts      = results[0].keypoints.xy.cpu().numpy()
-        # Confidence tensor is (N, 17) when available; None on older ultralytics builds.
         kpt_confs = (results[0].keypoints.conf.cpu().numpy()
                      if results[0].keypoints.conf is not None else None)
         boxes = results[0].boxes
@@ -244,9 +203,8 @@ class ShotTypeClassifier:
             detections_by_id, frame.shape[1], frame.shape[0])
 
         for player_idx, (player_id, data) in enumerate(players.items()):
-            # Use positional index (0=left, 1=right) as the stable key for all
-            # per-player state.  ByteTrack reassigns numeric IDs on re-detection,
-            # which would reset movement history; position on court does not change.
+            # Use court position (0=left, 1=right) as stable key instead of
+            # ByteTrack's numeric ID, which resets on re-detection
             stable_id = player_idx
             self._last_seen[stable_id] = frame_idx
             bbox      = data['bbox']
@@ -259,7 +217,6 @@ class ShotTypeClassifier:
 
             if shot_detected:
                 shot_name = SHOT_NAMES[shot_type]
-                # Store only lightweight metadata — not the full keypoints array
                 self.shots_detected.append({
                     'frame':               frame_idx,
                     'time':                frame_idx / fps,
@@ -273,15 +230,12 @@ class ShotTypeClassifier:
                     'type': shot_type, 'name': shot_name, 'frame': frame_idx}
                 if stable_id < len(shot_counters):
                     shot_counters[stable_id][shot_type] += 1
-                logger.info("Frame %d: Player %d — %s",
-                            frame_idx, stable_id + 1, shot_name)
 
         return current_info
 
     def _draw_frame(self, vis: np.ndarray, frame_idx: int,
                     frame_is_valid: bool, current_info: dict,
                     persistence: int) -> np.ndarray:
-        """Annotate a frame with bounding boxes and shot labels."""
         for stable_id, info in current_info.items():
             x1, y1, x2, y2 = map(int, info['bbox'])
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -311,18 +265,6 @@ class ShotTypeClassifier:
     def _detect_shot(self, player_id: int, keypoints: np.ndarray,
                      kpt_conf: Optional[np.ndarray],
                      frame_idx: int) -> tuple[bool, int]:
-        """
-        Three-stage shot detector designed for fast table-tennis motion:
-
-        1. Confidence gate  — discard frames where YOLO is uncertain about
-                              the wrist/elbow keypoints (motion blur, occlusion).
-        2. Peak detection   — fire only when wrist speed has just peaked
-                              (previous frame faster than both neighbours).
-                              Avoids duplicate triggers across the same swing.
-        3. Window vote      — classify the last _VOTE_WINDOW above-threshold
-                              frames and take the majority.  One noisy frame
-                              cannot flip the result.
-        """
         history = self._movement_history[player_id]
 
         joints = {
@@ -337,9 +279,7 @@ class ShotTypeClassifier:
             'right_hip':      keypoints[self._RIGHT_HIP],
         }
 
-        # ── Stage 1: confidence gate ───────────────────────────────────────────
-        # If YOLO isn't confident about the key joints, record a zero-speed
-        # entry so the peak detector keeps a clean timeline, then bail out.
+        # Skip frames where YOLO isn't confident about the key joints
         key_indices = (self._LEFT_WRIST, self._RIGHT_WRIST,
                        self._LEFT_ELBOW, self._RIGHT_ELBOW)
         if (kpt_conf is not None and
@@ -348,7 +288,7 @@ class ShotTypeClassifier:
                             'speed': 0.0, 'cls': SHOT_TYPES['UNKNOWN']})
             return False, SHOT_TYPES['UNKNOWN']
 
-        # ── Compute wrist speed for this frame ────────────────────────────────
+        # Compute wrist speed
         speed      = 0.0
         active_arm = 'right'
         if history:
@@ -375,20 +315,16 @@ class ShotTypeClassifier:
         if len(history) < 3:
             return False, SHOT_TYPES['UNKNOWN']
 
-        # ── Stage 2: peak detection ────────────────────────────────────────────
-        # We look one frame into the past: the true peak is the frame whose
-        # speed is higher than both its predecessor and the current frame.
-        recent = list(history)[-3:]
-        spds   = [h['speed'] for h in recent]
+        # Fire only when wrist speed just peaked (avoids duplicate triggers per swing)
+        recent     = list(history)[-3:]
+        spds       = [h['speed'] for h in recent]
         peak_speed = spds[1]
         if not (peak_speed > spds[0] and
                 peak_speed > spds[2] and
                 peak_speed > self._SPEED_THRESHOLD):
             return False, SHOT_TYPES['UNKNOWN']
 
-        # ── Stage 3: window vote ───────────────────────────────────────────────
-        # Collect classifications from the last _VOTE_WINDOW frames that were
-        # above threshold.  Majority rules — one blurry frame can't win.
+        # Majority vote over recent above-threshold frames
         window = [h['cls'] for h in history
                   if h['speed'] > self._SPEED_THRESHOLD][-self._VOTE_WINDOW:]
         if not window:
@@ -396,7 +332,6 @@ class ShotTypeClassifier:
 
         voted_cls = Counter(window).most_common(1)[0][0]
 
-        # Debounce — suppress rapid re-triggering for the same player.
         last = self._last_shot_info.get(player_id)
         if last and frame_idx - last['frame'] < self._DEBOUNCE_FRAMES:
             return False, voted_cls
@@ -404,17 +339,10 @@ class ShotTypeClassifier:
         return True, voted_cls
 
     def _classify(self, active_arm: str, joints: dict, speed: float) -> int:
-        """
-        Classify a shot using arm geometry.
-          SMASH:    high speed + wrist well above shoulder
-          BACKHAND: arm crossing the body midline
-          FOREHAND: arm on the active side at moderate-to-high speed
-          PUSH:     slow, controlled contact
-        """
-        shoulder  = joints[f'{active_arm}_shoulder']
-        elbow     = joints[f'{active_arm}_elbow']
-        wrist     = joints[f'{active_arm}_wrist']
-        opp_sh    = joints['right_shoulder' if active_arm == 'left' else 'left_shoulder']
+        shoulder = joints[f'{active_arm}_shoulder']
+        elbow    = joints[f'{active_arm}_elbow']
+        wrist    = joints[f'{active_arm}_wrist']
+        opp_sh   = joints['right_shoulder' if active_arm == 'left' else 'left_shoulder']
 
         if any(np.isnan(j).any() for j in (shoulder, elbow, wrist, opp_sh)):
             return SHOT_TYPES['UNKNOWN']
@@ -425,7 +353,7 @@ class ShotTypeClassifier:
         arm_crossing = (active_arm == 'right' and wrist[0] < body_cx) or \
                        (active_arm == 'left'  and wrist[0] > body_cx)
 
-        if   speed > self._SMASH_SPEED and wrist[1] < shoulder[1] - self._SMASH_WRIST_LIFT:
+        if speed > self._SMASH_SPEED and wrist[1] < shoulder[1] - self._SMASH_WRIST_LIFT:
             return SHOT_TYPES['SMASH']
         elif arm_crossing and speed > self._BACKHAND_SPEED:
             return SHOT_TYPES['BACKHAND']
@@ -436,14 +364,12 @@ class ShotTypeClassifier:
 
         return SHOT_TYPES['UNKNOWN']
 
-    def _save_statistics(self, shot_counters: list, fps: float,
+    def _save_statistics(self, shot_counters: list, _fps: float,
                           output_dir: str) -> None:
-        """Save shot distribution chart, time-series scatter, and raw CSV."""
         plot_types  = [k for k in SHOT_TYPES if k != 'UNKNOWN']
         plot_values = [SHOT_TYPES[k] for k in plot_types]
         x, bar_w    = np.arange(len(plot_types)), 0.35
 
-        # ── Bar chart ──
         plt.figure(figsize=(12, 8))
         plt.bar(x - bar_w / 2, [shot_counters[0].get(v, 0) for v in plot_values],
                 bar_w, label='Player 1')
@@ -465,9 +391,7 @@ class ShotTypeClassifier:
         df       = pd.DataFrame(self.shots_detected)
         csv_path = f"{output_dir}/shot_data.csv"
         df.to_csv(csv_path, index=False)
-        logger.info("Shot data saved → %s", csv_path)
 
-        # ── Time-series scatter ──
         colors   = plt.colormaps['tab10'].resampled(len(plot_types))
         detected = df['player_idx_relative'].unique()
 
@@ -503,7 +427,6 @@ class ShotTypeClassifier:
         plt.savefig(f"{output_dir}/shot_sequence.png", dpi=300, bbox_inches='tight')
         plt.close()
 
-        # ── Console summary ──
         logger.info("===== SHOT SUMMARY =====")
         logger.info("Total: %d shots", len(self.shots_detected))
         for idx, label in enumerate(('Player 1', 'Player 2')):
@@ -515,19 +438,15 @@ class ShotTypeClassifier:
                                       sorted(dist.items(), key=lambda x: -x[1])))
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Table Tennis Shot Classifier")
     parser.add_argument("video_path")
-    parser.add_argument("--start",        type=float, default=None,
-                        help="Start time in seconds (default: beginning of video)")
-    parser.add_argument("--end",          type=float, default=None,
-                        help="End time in seconds (default: end of video)")
-    parser.add_argument("--sample-rate",  type=int,   default=2)
-    parser.add_argument("--output-dir",   default="output_shot")
-    parser.add_argument("--no-vis",       action="store_true")
-    parser.add_argument("--debug",        action="store_true")
+    parser.add_argument("--start",       type=float, default=None)
+    parser.add_argument("--end",         type=float, default=None)
+    parser.add_argument("--sample-rate", type=int,   default=2)
+    parser.add_argument("--output-dir",  default="output_shot")
+    parser.add_argument("--no-vis",      action="store_true")
+    parser.add_argument("--debug",       action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -535,9 +454,8 @@ def main() -> None:
         format="%(levelname)s | %(name)s | %(message)s",
     )
 
-    # Convert seconds → frames using the video's actual FPS.
-    _cap = cv2.VideoCapture(args.video_path)
-    _fps = _cap.get(cv2.CAP_PROP_FPS) or 30.0
+    _cap   = cv2.VideoCapture(args.video_path)
+    _fps   = _cap.get(cv2.CAP_PROP_FPS) or 30.0
     _total = int(_cap.get(cv2.CAP_PROP_FRAME_COUNT))
     _cap.release()
 
