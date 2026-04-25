@@ -1,0 +1,21 @@
+# Video files
+*.mp4
+*.avi
+*.mov
+
+# Model weights
+*.pt
+
+# Generated outputs
+output_shot/
+score_screenshots/
+__pycache__/
+*.pyc
+
+# Data outputs (optional — remove if you want to track these)
+*.csv
+*.png
+*.jpg
+
+# Background frame
+background.jpg

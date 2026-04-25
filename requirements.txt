@@ -1,0 +1,7 @@
+opencv-python>=4.8
+ultralytics>=8.0
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+easyocr>=1.7
+pandas>=2.0
